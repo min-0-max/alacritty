@@ -8,6 +8,18 @@ sections should follow the order `Added`, `Changed`, `Deprecated`, `Fixed` and
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## 0.26.0-soksak
+
+### Added
+
+- `EventListener::alt_screen_line_leaving`, `EventListener::alt_screen_entering` and
+  `EventListener::alt_screen_leaving` to read the lines that scroll off the top of the alternate
+  screen and the alternate screen as a program leaves it
+
+### Changed
+
+- **`Term::swap_alt` requires `T: EventListener`**
+
 ## 0.26.0
 
 ### Added

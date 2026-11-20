@@ -3,7 +3,9 @@ use std::fmt::{self, Debug, Formatter};
 use std::process::ExitStatus;
 use std::sync::Arc;
 
+use crate::grid::{Grid, Row};
 use crate::term::ClipboardType;
+use crate::term::cell::Cell;
 use crate::vte::ansi::Rgb;
 
 /// Terminal event.
@@ -102,6 +104,31 @@ pub trait OnResize {
 /// Event Loop for notifying the renderer about terminal events.
 pub trait EventListener {
     fn send_event(&self, _event: Event) {}
+
+    /// A line is about to scroll off the top of the alternate screen.
+    ///
+    /// The alternate screen has no scrollback history, so this is the last time the line can be
+    /// read; the line is borrowed only during the call and is cleared by the scroll after it. It
+    /// is called for each line, from the top, when a line feed, `IND`, `NEL` or an automatic wrap
+    /// of the input at the bottom margin, or `CSI S`, scrolls up a scroll region that starts at
+    /// the top of the alternate screen. Deleting lines and resizing do not call it.
+    ///
+    /// Like the other methods of this trait it is called while the terminal handles input, so it
+    /// must not block.
+    fn alt_screen_line_leaving(&self, _line: &Row<Cell>) {}
+
+    /// The terminal is about to switch from the primary screen to the alternate screen.
+    ///
+    /// It is called by [`Term::swap_alt`](crate::term::Term::swap_alt), which the input calls for
+    /// `CSI ? 1049 h`, in order with [`EventListener::alt_screen_line_leaving`].
+    fn alt_screen_entering(&self) {}
+
+    /// The terminal is about to switch from the alternate screen to the primary screen.
+    ///
+    /// `screen` is the alternate screen as the program left it. It is called by
+    /// [`Term::swap_alt`](crate::term::Term::swap_alt), which the input calls for `CSI ? 1049 l`,
+    /// and by a full reset (`RIS`) on the alternate screen, before the reset clears the screen.
+    fn alt_screen_leaving(&self, _screen: &Grid<Cell>) {}
 }
 
 /// Null sink for events.
