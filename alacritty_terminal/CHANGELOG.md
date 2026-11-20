@@ -13,6 +13,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - `Term::inactive_grid` to read the grid of the inactive screen buffer
+- `EventListener::alt_screen_line_leaving`, `EventListener::alt_screen_entering` and
+  `EventListener::alt_screen_leaving` to read the lines that scroll off the top of the alternate
+  screen and the alternate screen as a program leaves it
+
+### Changed
+
+- **`Term::swap_alt` requires `T: EventListener`**
 
 ## 0.26.0
 

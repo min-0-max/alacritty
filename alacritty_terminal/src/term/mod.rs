@@ -719,8 +719,17 @@ impl<T> Term<T> {
     }
 
     /// Swap primary and alternate screen buffer.
-    pub fn swap_alt(&mut self) {
-        if !self.mode.contains(TermMode::ALT_SCREEN) {
+    ///
+    /// The listener is told before the swap: [`EventListener::alt_screen_entering`] when the
+    /// alternate screen is entered, and [`EventListener::alt_screen_leaving`] with the alternate
+    /// screen when it is left.
+    pub fn swap_alt(&mut self)
+    where
+        T: EventListener,
+    {
+        if self.mode.contains(TermMode::ALT_SCREEN) {
+            self.event_proxy.alt_screen_leaving(&self.grid);
+        } else {
             // Set alt screen cursor to the current primary screen cursor.
             self.inactive_grid.cursor = self.grid.cursor.clone();
 
@@ -729,6 +738,8 @@ impl<T> Term<T> {
 
             // Reset alternate screen contents.
             self.inactive_grid.reset_region(..);
+
+            self.event_proxy.alt_screen_entering();
         }
 
         mem::swap(&mut self.keyboard_mode_stack, &mut self.inactive_keyboard_mode_stack);
@@ -1491,6 +1502,15 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn scroll_up(&mut self, lines: usize) {
+        // Hand the lines that leave the top of the alternate screen to the listener, since the
+        // alternate screen keeps no history.
+        if self.mode.contains(TermMode::ALT_SCREEN) && self.scroll_region.start == 0 {
+            let lines = cmp::min(lines, self.scroll_region.end.0 as usize);
+            for line in 0..lines {
+                self.event_proxy.alt_screen_line_leaving(&self.grid[Line(line as i32)]);
+            }
+        }
+
         let origin = self.scroll_region.start;
         self.scroll_up_relative(origin, lines);
     }
@@ -1842,6 +1862,7 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn reset_state(&mut self) {
         if self.mode.contains(TermMode::ALT_SCREEN) {
+            self.event_proxy.alt_screen_leaving(&self.grid);
             mem::swap(&mut self.grid, &mut self.inactive_grid);
         }
         self.active_charset = Default::default();
@@ -2519,7 +2540,7 @@ mod tests {
     use std::mem;
 
     use crate::event::VoidListener;
-    use crate::grid::{Grid, Scroll};
+    use crate::grid::{Grid, Row, Scroll};
     use crate::index::{Column, Point, Side};
     use crate::selection::{Selection, SelectionType};
     use crate::term::cell::{Cell, Flags};
@@ -3337,5 +3358,130 @@ mod tests {
         assert_eq!(version_number("0.1.2-dev"), 1_02);
         assert_eq!(version_number("1.2.3-dev"), 1_02_03);
         assert_eq!(version_number("999.99.99"), 9_99_99_99);
+    }
+
+    /// Listener that records each line that leaves the alternate screen, each entry to it and the
+    /// screen at each exit.
+    #[derive(Default)]
+    struct AltScreenRecord(std::cell::RefCell<Vec<String>>);
+
+    fn row_text(row: &Row<Cell>) -> String {
+        let text: String = (0..row.len())
+            .filter(|&column| !row[Column(column)].flags.contains(Flags::WIDE_CHAR_SPACER))
+            .map(|column| row[Column(column)].c)
+            .collect();
+        text.trim_end().into()
+    }
+
+    impl EventListener for AltScreenRecord {
+        fn alt_screen_line_leaving(&self, line: &Row<Cell>) {
+            let wrapped = line[Column(line.len() - 1)].flags.contains(Flags::WRAPLINE);
+            let mark = if wrapped { "+" } else { "" };
+            self.0.borrow_mut().push(format!("{}{mark}", row_text(line)));
+        }
+
+        fn alt_screen_entering(&self) {
+            self.0.borrow_mut().push("<entering>".into());
+        }
+
+        fn alt_screen_leaving(&self, screen: &Grid<Cell>) {
+            let rows: Vec<String> = (0..screen.screen_lines() as i32)
+                .map(|line| row_text(&screen[Line(line)]))
+                .collect();
+            self.0.borrow_mut().push(format!("<leaving {}>", rows.join("|")));
+        }
+    }
+
+    fn alt_screen_record(bytes: &[u8]) -> (Term<AltScreenRecord>, Vec<String>) {
+        let size = TermSize::new(5, 3);
+        let mut term = Term::new(Config::default(), &size, AltScreenRecord::default());
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(&mut term, bytes);
+        let record = term.event_proxy.0.take();
+        (term, record)
+    }
+
+    #[test]
+    fn alt_screen_line_leaving_by_line_feed_ind_nel_and_csi_s() {
+        let (_, record) = alt_screen_record(b"\x1b[?1049h\x1b[H1\r\n2\r\n3\n4\x1bD5\x1bE6\x1b[2S");
+
+        assert_eq!(record, ["<entering>", "1", "2", "3", " 4", "  5"]);
+    }
+
+    #[test]
+    fn alt_screen_line_leaving_by_wrap_keeps_the_wrapped_line_and_wide_chars() {
+        let (_, record) =
+            alt_screen_record("\x1b[?1049h\x1b[Habcdefg\r\n\u{d55c}x\r\nz\r\nw\r\nv".as_bytes());
+
+        assert_eq!(record, ["<entering>", "abcde+", "fg", "\u{d55c}x"]);
+    }
+
+    #[test]
+    fn alt_screen_line_leaving_is_not_called_on_the_primary_screen() {
+        let (_, record) = alt_screen_record(b"1\r\n2\r\n3\r\n4");
+
+        assert!(record.is_empty());
+    }
+
+    #[test]
+    fn alt_screen_line_leaving_is_not_called_below_the_top_or_for_deleted_lines() {
+        let (_, record) =
+            alt_screen_record(b"\x1b[?1049h\x1b[2;3r\x1b[2Ha\r\nb\r\nc\x1b[r\x1b[Hx\x1b[M\x1b[Hy");
+
+        assert_eq!(record, ["<entering>"]);
+    }
+
+    #[test]
+    fn alt_screen_line_leaving_in_a_region_that_ends_above_the_bottom() {
+        let (_, record) = alt_screen_record(b"\x1b[?1049h\x1b[1;2r\x1b[Ha\r\nb\r\nc");
+
+        assert_eq!(record, ["<entering>", "a"]);
+    }
+
+    #[test]
+    fn alt_screen_entering_and_leaving_are_called_in_order_with_the_lines() {
+        let (_, record) =
+            alt_screen_record(b"\x1b[?1049h\x1b[3Ha\r\nb\x1b[?1049l\x1b[?1049h\x1b[3Hc\x1bc");
+
+        assert_eq!(record, ["<entering>", "", "<leaving |a|b>", "<entering>", "<leaving ||c>"]);
+    }
+
+    #[test]
+    fn alt_screen_line_leaving_is_called_once_per_line_of_a_scroll_beyond_the_region() {
+        let (_, record) = alt_screen_record(b"\x1b[?1049h\x1b[1;2r\x1b[Ha\r\nb\x1b[9S");
+
+        assert_eq!(record, ["<entering>", "a", "b"]);
+    }
+
+    #[test]
+    fn alt_screen_line_leaving_is_called_once_per_line_of_a_scroll_beyond_the_screen() {
+        let (_, record) = alt_screen_record(b"\x1b[?1049h\x1b[Ha\r\nb\r\nc\x1b[9S");
+
+        assert_eq!(record, ["<entering>", "a", "b", "c"]);
+    }
+
+    #[test]
+    fn alt_screen_leaving_is_not_called_by_a_reset_on_the_primary_screen() {
+        let (_, record) = alt_screen_record(b"1\x1bc");
+
+        assert!(record.is_empty());
+    }
+
+    #[test]
+    fn alt_screen_entering_is_called_once_for_a_repeated_entry() {
+        let (_, record) = alt_screen_record(b"\x1b[?1049h\x1b[?1049h");
+
+        assert_eq!(record, ["<entering>"]);
+    }
+
+    #[test]
+    fn alt_screen_resize_keeps_no_history() {
+        let (mut term, _) = alt_screen_record(b"\x1b[?1049h\x1b[Ha\r\nb\r\nc");
+        term.resize(TermSize::new(5, 2));
+        term.resize(TermSize::new(5, 3));
+
+        let screen: Vec<String> = (0..3).map(|line| row_text(&term.grid[Line(line)])).collect();
+        assert_eq!(screen, ["b", "c", ""]);
+        assert!(term.event_proxy.0.borrow().is_empty());
     }
 }
