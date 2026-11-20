@@ -8,6 +8,12 @@ sections should follow the order `Added`, `Changed`, `Deprecated`, `Fixed` and
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## 0.26.0-soksak
+
+### Added
+
+- `Term::inactive_grid` to read the grid of the inactive screen buffer
+
 ## 0.26.0
 
 ### Added

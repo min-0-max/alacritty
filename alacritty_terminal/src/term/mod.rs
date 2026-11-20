@@ -651,6 +651,14 @@ impl<T> Term<T> {
         &mut self.grid
     }
 
+    /// Access to the raw grid data structure of the inactive screen buffer.
+    ///
+    /// While the alternate screen buffer is active, this is the primary grid with its scrollback
+    /// history. Otherwise it is the alternate screen buffer.
+    pub fn inactive_grid(&self) -> &Grid<Cell> {
+        &self.inactive_grid
+    }
+
     /// Resize terminal to new dimensions.
     pub fn resize<S: Dimensions>(&mut self, size: S) {
         let old_cols = self.columns();
@@ -2911,6 +2919,37 @@ mod tests {
 
         assert_eq!(term.history_size(), 0);
         assert_eq!(term.grid.cursor.point, Point::new(Line(19), Column(0)));
+    }
+
+    #[test]
+    fn inactive_grid_is_primary_grid_in_alt_screen() {
+        let size = TermSize::new(5, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+
+        // Write one character per line and create 3 lines of scrollback.
+        for c in ['a', 'b', 'c', 'd', 'e'] {
+            term.input(c);
+            term.newline();
+            term.carriage_return();
+        }
+        assert_eq!(term.history_size(), 3);
+
+        // Enter alt screen and draw over it.
+        term.set_private_mode(NamedPrivateMode::SwapScreenAndSetRestoreCursor.into());
+        term.input('x');
+
+        // The inactive grid holds the primary screen and its history.
+        let primary = term.inactive_grid();
+        assert_eq!(primary.history_size(), 3);
+        assert_eq!(primary[Line(-3)][Column(0)].c, 'a');
+        assert_eq!(primary[Line(-1)][Column(0)].c, 'c');
+        assert_eq!(primary[Line(1)][Column(0)].c, 'e');
+        assert_eq!(term.grid()[Line(2)][Column(0)].c, 'x');
+
+        // Leave alt screen; the inactive grid is the alternate screen buffer.
+        term.unset_private_mode(NamedPrivateMode::SwapScreenAndSetRestoreCursor.into());
+        assert_eq!(term.inactive_grid()[Line(2)][Column(0)].c, 'x');
+        assert_eq!(term.grid()[Line(-3)][Column(0)].c, 'a');
     }
 
     #[test]
